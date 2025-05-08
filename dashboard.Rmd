@@ -1,0 +1,230 @@
+---
+title: "IVI - Book Recommendations"
+author: "Annabelle McPherson"
+date: "2025-05-05"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    storyboard: false
+    navbar:
+      - { title: "Recommendation", href: "#" }
+      - { title: "Statistics", href: "#" }
+      - { title: "Book Details", href: "#book-details" }
+runtime: shiny
+---
+
+```{r global, include=FALSE}
+library(tidyverse)
+library(DT)
+library(shiny)
+library(stringr)
+library(lubridate)
+library(plotly)
+library(jsonlite)
+
+data <- read.csv("books_1.Best_Books_Ever.csv")
+data <- data %>% filter(language == "English")
+
+data$main_genre <- sapply(data$genres, function(g) {
+  g <- str_replace_all(g, regex("\\[|\\]|'"), "")
+  genres <- unlist(str_split(g, ", "))
+  if (length(genres) > 0) genres[1] else NA
+})
+
+data$year <- str_extract(data$publishDate, regex("\\d{4}")) %>% as.numeric()
+current_year <- as.numeric(format(Sys.Date(), "%Y"))
+data <- data %>%
+  mutate(year = ifelse(year > current_year + 5 | year < 1000, NA, year))
+
+books <- data %>%
+  select(title, author, rating, numRatings, description, main_genre, year, ratingsByStars, likedPercent)
+```
+
+Recommendation
+=======================================================================
+
+Column {data-width=300}
+-----------------------------------------------------------------------
+
+```{r}
+inputPanel(
+  selectInput("genre", "Select genre:",
+              choices = sort(unique(books$main_genre)),
+              selected = "Fiction", multiple = TRUE),
+  sliderInput("year", "Publication year:",
+              min = min(books$year, na.rm = TRUE),
+              max = max(books$year, na.rm = TRUE),
+              value = c(2000, 2020), sep = ""),
+  sliderInput("rating", "Rating:", min = 1, max = 5, value = c(3.5, 5), step = 0.1),
+  actionButton("recommend", "🎲 Recommend a random book")
+)
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Random book recommendation
+
+```{r}
+filtered_books <- reactive({
+  books %>%
+    filter(main_genre %in% input$genre,
+           year >= input$year[1], year <= input$year[2],
+           rating >= input$rating[1], rating <= input$rating[2])
+})
+
+random_book <- eventReactive(input$recommend, {
+  fb <- filtered_books()
+  if (nrow(fb) > 0) {
+    fb[sample(1:nrow(fb), 1), ]
+  } else {
+    NULL
+  }
+})
+
+output$random_recommendation <- renderUI({
+  rb <- random_book()
+  if (!is.null(rb)) {
+    wellPanel(
+      h4("📖"),
+      strong(rb$title), "written by", em(rb$author), br(),
+      paste("Genre:", rb$main_genre), br(),
+      paste("Rating:", rb$rating), br(), br(),
+      HTML(paste0("<em>", rb$description, "</em>"))
+    )
+  } else {
+    wellPanel(
+      h4("No books found😕"),
+      "Please change the filtersettings."
+    )
+  }
+})
+uiOutput("random_recommendation")
+```
+
+### Filtered book list
+
+```{r}
+DT::dataTableOutput("book_table")
+br()
+uiOutput("book_details")
+```
+
+```{r}
+output$book_table <- DT::renderDT({
+  fb <- filtered_books()
+  display <- fb %>%
+    select('Title' = title, 'Author' = author, 'Genre' = main_genre,
+           'Year' = year, 'Rating' = rating, 'Number of Ratings' = numRatings)
+  display
+}, selection = "single", server = TRUE)
+```
+
+```{r}
+output$book_details <- renderUI({
+  selected_row <- input$book_table_rows_selected
+  fb <- filtered_books()
+  
+  if (length(selected_row) == 1 && selected_row <= nrow(fb)) {
+    book <- fb[selected_row, , drop = FALSE]
+    
+    wellPanel(
+      h4("📘 Book Details"),
+      strong(book$title), "written by", em(book$author), br(),
+      paste("Genre:", book$main_genre), br(),
+      paste("Year:", book$year), br(),
+      paste("Rating:", book$rating), br(), br(),
+      HTML(paste0("<em>", str_trunc(book$description, 600), "</em>"))
+    )
+  } else {
+    helpText("Look the books up under the 'Book Details' - tab for more information")
+  }
+})
+```
+
+Statistics
+=======================================================================
+
+Column
+-----------------------------------------------------------------------
+
+### Top Genres by Ratingen
+
+```{r}
+genre_counts <- reactive({
+  books %>%
+    group_by(main_genre) %>%
+    summarise(n = n(), total_ratings = sum(numRatings, na.rm = TRUE)) %>%
+    arrange(desc(total_ratings)) %>%
+    head(10)
+})
+
+output$genre_popularity_plot <- renderPlotly({
+  ggplot(genre_counts(), aes(x = reorder(main_genre, total_ratings), y = total_ratings)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    coord_flip() +
+    labs(x = "Genre", y = "Number of Ratings", title = "Top 10 Genres by Number of Ratings") +
+    theme_minimal()
+})
+plotlyOutput("genre_popularity_plot")
+```
+
+### Distribution by Year
+
+```{r}
+output$year_distribution_plot <- renderPlotly({
+  books %>%
+    ggplot(aes(x = year)) +
+    geom_histogram(binwidth = 10, fill = "skyblue", color = "black") +
+    labs(x = "Year", y = "Number of books", title = "Distribution over the years") +
+    theme_minimal()
+})
+plotlyOutput("year_distribution_plot")
+```
+
+Book Details {#book-details}
+=======================================================================
+
+Column {data-width=300}
+-----------------------------------------------------------------------
+
+### Books by Title
+
+```{r}
+textInput("search_title", "🔎 Enter a Book Title", placeholder = "e.g. Harry Potter")
+actionButton("search", "Suchen")
+```
+
+```{r}
+selected_book <- eventReactive(input$search, {
+  req(input$search_title)
+  res <- books %>% filter(str_detect(title, fixed(input$search_title, ignore_case = TRUE)))
+  if (nrow(res) > 0) res[1, ] else NULL
+})
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Book Details
+
+```{r}
+output$book_summary <- renderUI({
+  book <- selected_book()
+  req(book)
+  
+  wellPanel(
+    h4("📘", book$title),
+    paste("Author: ", book$author), br(),
+    paste("Genre: ", book$main_genre), br(),
+    paste("Year: ", book$year), br(),
+    paste("Rating: ", book$rating), br(),
+    paste("Number of Ratings: ", format(book$numRatings, big.mark = ",")), br(),
+    paste("Gefällt %: ", ifelse(is.na(book$likedPercent), "Not available", paste0(book$likedPercent, "%"))), br(), br(),
+    HTML(paste0("<em>", book$description, "</em>"))
+  )
+})
+uiOutput("book_summary")
+```
+
